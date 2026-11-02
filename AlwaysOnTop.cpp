@@ -3,12 +3,9 @@
 //   剥离掉：遥测/ETW、GPO 组策略、提权通知、游戏模式、集中热键服务(LLKH)、虚拟桌面判断
 //   保留  ：热键置顶、置顶高亮边框、热键调透明度、托盘退出
 //
-// 热键：
-//   Shift+Win+T       切换前台窗口置顶（被占用时自动回退 Alt+Win+T）
-//   Win+Ctrl+上/下    增加/降低已置顶前台窗口的透明度
-// 托盘右键菜单：
-//   "选择窗口置顶"    全屏遮罩 + 十字光标，点击任意窗口即可置顶/取消（无需先激活该窗口）
-//   "退出"
+// 置顶方式：托盘右键 →「选择窗口置顶」，全屏遮罩 + 十字光标，点击任意窗口即可置顶/取消
+//           （无需先激活该窗口；Esc/右键取消选窗）
+// 透明度热键：Win+Ctrl+上/下 增加/降低已置顶前台窗口的透明度
 // 单置顶模式：全局只保留一个置顶窗口，钉新窗口时自动取消上一个。
 //
 // 编译（zig cc / MSVC 均可）:
@@ -30,12 +27,10 @@ static const wchar_t kPickClass[]   = L"AOTMini_Pick";
 static const wchar_t kPinProp[]     = L"AOTMini_Pinned";
 static const wchar_t kMutexName[]   = L"Local\\AOTMini_InstanceMutex";
 static const UINT    WM_APP_TRAY    = WM_APP + 1;
-static const int     ID_HOTKEY_PIN  = 1;
 static const int     ID_HOTKEY_OP_UP = 2;
 static const int     ID_HOTKEY_OP_DOWN = 3;
 static const int     IDM_EXIT       = 100;
 static const int     IDM_PICK       = 101;
-static bool          g_hotkeyFallback = false; // 置顶热键被占用，已回退 Alt+Win+T
 static const COLORREF BORDER_COLOR  = RGB(255, 128, 0); // 高亮边框颜色（橙）
 static const int     TRANS_STEP     = 10;               // 每次透明度步进 (%)
 
@@ -152,7 +147,7 @@ static void ApplyAlpha(HWND hwnd, int percentage)
     // 首次修改前缓存原始状态，取消置顶时恢复
     if (g.originalLayered.find(hwnd) == g.originalLayered.end())
     {
-        RECT state{ percentage, 0, layered ? 1 : 0, 0 }; // left 存"应用过的透明度"，right 存原本是否 layered
+        RECT state{ percentage, 0, layered ? 1 : 0, 0 }; // left 存“应用过的透明度”，right 存原本是否 layered
         BYTE alpha = 255; COLORREF key = 0; DWORD flags = 0;
         if (layered && GetLayeredWindowAttributes(hwnd, &key, &alpha, &flags))
         {
@@ -225,13 +220,6 @@ static void TogglePinWindow(HWND hwnd)
     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     SetPropW(hwnd, kPinProp, (HANDLE)1);
     g.pinned[hwnd] = CreateBorder(hwnd);
-}
-
-static void ToggleForeground()
-{
-    HWND hwnd = GetForegroundWindow();
-    if (!hwnd || hwnd == g.host) return;
-    TogglePinWindow(hwnd);
 }
 
 static void StepForegroundTransparency(int delta)
@@ -377,10 +365,7 @@ static void EnterPickMode()
 static void ShowTrayMenu()
 {
     HMENU menu = CreatePopupMenu();
-    wchar_t pickText[64];
-    _snwprintf(pickText, 64, L"选择窗口置顶 (点击目标窗口)%s",
-               g_hotkeyFallback ? L"  [热键已回退为 Alt+Win+T]" : L"");
-    AppendMenuW(menu, MF_STRING, IDM_PICK, pickText);
+    AppendMenuW(menu, MF_STRING, IDM_PICK, L"选择窗口置顶 (点击目标窗口)");
     AppendMenuW(menu, MF_STRING, IDM_EXIT, L"退出");
 
     POINT pt;
@@ -402,7 +387,7 @@ static void InitTray()
     g.nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g.nid.uCallbackMessage = WM_APP_TRAY;
     g.nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    lstrcpyW(g.nid.szTip, L"AlwaysOnTop Mini - Shift+Win+T 置顶窗口");
+    lstrcpyW(g.nid.szTip, L"AlwaysOnTop Mini - 托盘选窗置顶");
     Shell_NotifyIconW(NIM_ADD, &g.nid);
 }
 
@@ -448,8 +433,7 @@ static LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg)
     {
     case WM_HOTKEY:
-        if (wp == ID_HOTKEY_PIN) ToggleForeground();
-        else if (wp == ID_HOTKEY_OP_UP) StepForegroundTransparency(+TRANS_STEP);
+        if (wp == ID_HOTKEY_OP_UP) StepForegroundTransparency(+TRANS_STEP);
         else if (wp == ID_HOTKEY_OP_DOWN) StepForegroundTransparency(-TRANS_STEP);
         return 0;
     case WM_APP_TRAY:
@@ -500,24 +484,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
 
     InitTray();
 
-    // 热键注册（带冲突回退）：首选 Shift+Win+T；被其他程序占用时自动回退 Alt+Win+T
-    UINT pinMods = MOD_SHIFT | MOD_WIN | MOD_NOREPEAT;
-    UINT pinKey = 'T';
-    if (!RegisterHotKey(g.host, ID_HOTKEY_PIN, pinMods, pinKey))
-    {
-        pinMods = MOD_ALT | MOD_WIN | MOD_NOREPEAT;
-        if (RegisterHotKey(g.host, ID_HOTKEY_PIN, pinMods, pinKey))
-        {
-            g_hotkeyFallback = true;
-        }
-        else
-        {
-            MessageBoxW(nullptr,
-                        L"置顶热键注册失败：Shift+Win+T 和 Alt+Win+T 均被其他程序占用。\n"
-                        L"仍可使用托盘菜单\"选择窗口置顶\"。",
-                        L"AlwaysOnTop Mini", MB_OK | MB_ICONWARNING);
-        }
-    }
+    // 透明度热键：Win+Ctrl+↑/↓（置顶操作仅通过托盘菜单选窗完成）
     RegisterHotKey(g.host, ID_HOTKEY_OP_UP, MOD_CONTROL | MOD_WIN | MOD_NOREPEAT, VK_UP);
     RegisterHotKey(g.host, ID_HOTKEY_OP_DOWN, MOD_CONTROL | MOD_WIN | MOD_NOREPEAT, VK_DOWN);
 
