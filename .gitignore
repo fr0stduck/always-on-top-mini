@@ -1,0 +1,6 @@
+# AlwaysOnTop Mini build artifacts
+*.exe
+*.obj
+*.pdb
+zig-cache/
+zig-out/
