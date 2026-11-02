@@ -31,6 +31,7 @@ static const int     ID_HOTKEY_OP_UP = 2;
 static const int     ID_HOTKEY_OP_DOWN = 3;
 static const int     IDM_EXIT       = 100;
 static const int     IDM_PICK       = 101;
+static const int     IDM_AUTORUN    = 102;
 static const COLORREF BORDER_COLOR  = RGB(255, 128, 0); // 高亮边框颜色（橙）
 static const int     TRANS_STEP     = 10;               // 每次透明度步进 (%)
 
@@ -361,11 +362,56 @@ static void EnterPickMode()
     SetFocus(g_pickOverlay);
 }
 
+// ---------- 开机自启（HKCU Run 键，无需管理员权限） ----------
+static const wchar_t kRunKey[]   = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const wchar_t kRunValue[] = L"AlwaysOnTopMini";
+
+static bool IsAutoRunEnabled()
+{
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+        return false;
+    DWORD type = 0, size = 0;
+    LSTATUS st = RegQueryValueExW(key, kRunValue, nullptr, &type, nullptr, &size);
+    RegCloseKey(key);
+    return st == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ);
+}
+
+static bool SetAutoRun(bool enable)
+{
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS)
+        return false;
+
+    LSTATUS st;
+    if (enable)
+    {
+        wchar_t path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        // 引号包裹，防路径含空格
+        wchar_t cmd[MAX_PATH + 4]{};
+        _snwprintf(cmd, MAX_PATH + 4, L"\"%s\"", path);
+        st = RegSetValueExW(key, kRunValue, 0, REG_SZ,
+                            (const BYTE*)cmd,
+                            (DWORD)((lstrlenW(cmd) + 1) * sizeof(wchar_t)));
+    }
+    else
+    {
+        st = RegDeleteValueW(key, kRunValue);
+        if (st == ERROR_FILE_NOT_FOUND) st = ERROR_SUCCESS; // 本来就没有，视为成功
+    }
+    RegCloseKey(key);
+    return st == ERROR_SUCCESS;
+}
+
 // ---------- 托盘 ----------
 static void ShowTrayMenu()
 {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, IDM_PICK, L"选择窗口置顶 (点击目标窗口)");
+    AppendMenuW(menu, MF_STRING | (IsAutoRunEnabled() ? MF_CHECKED : MF_UNCHECKED),
+                IDM_AUTORUN, L"开机自动运行");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_EXIT, L"退出");
 
     POINT pt;
@@ -377,6 +423,11 @@ static void ShowTrayMenu()
 
     if (cmd == IDM_EXIT) DestroyWindow(g.host);
     else if (cmd == IDM_PICK) EnterPickMode();
+    else if (cmd == IDM_AUTORUN)
+    {
+        if (!SetAutoRun(!IsAutoRunEnabled()))
+            MessageBoxW(g.host, L"修改开机自启失败（注册表写入被拒绝）。", L"AlwaysOnTop Mini", MB_OK | MB_ICONERROR);
+    }
 }
 
 static void InitTray()
